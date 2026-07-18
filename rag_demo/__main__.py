@@ -4,12 +4,17 @@ import os
 import time
 from dotenv import load_dotenv
 import requests
+import numpy as np
 
 ### PostgreSQL adapter for Python
 import psycopg
 
 ### PyPDF for text extraction
 from PyPDF2 import PdfReader
+
+### Transformers for local embeddings and QA
+from transformers import AutoTokenizer, AutoModel, pipeline
+import torch
 
 ### Constants
 load_dotenv()
@@ -24,6 +29,16 @@ HEADERS = {
     "x-wait-for-model": "true",
 }
 
+# Load local embedding model
+print("Loading embedding model...")
+embedding_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
+embedding_model = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5")
+embedding_model.eval()
+
+# Load local QA pipeline
+print("Loading QA model...")
+qa_pipeline = pipeline("question-answering", model="deepset/roberta-base-squad2", device=0 if torch.cuda.is_available() else -1)
+
 ### Argument parser
 parser = argparse.ArgumentParser(description="RAG Demo")
 parser.add_argument(
@@ -31,23 +46,51 @@ parser.add_argument(
     action="store_true",
     help="Skip the embedding step and use the existing embeddings if this flag is provided.",
 )
+parser.add_argument(
+    "--use-remote-api",
+    action="store_true",
+    help="Use remote Hugging Face API instead of local models (requires internet).",
+)
 args = parser.parse_args()
 
 ### Useful functions [can go to a utils.py file]
+def get_embedding_local(text):
+    """Get embedding using local model"""
+    inputs = embedding_tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = embedding_model(**inputs)
+        embeddings = outputs.last_hidden_state.mean(dim=1)
+    return embeddings.squeeze().numpy().tolist()
+
 def get_embedding(payload):
-    response = requests.post(
-        EMBEDDINGS_API_URL,
-        headers=HEADERS,
-        json=payload,
-    )
-    return response.json()
+    """Get embedding - uses local model by default, falls back to API if specified"""
+    if args.use_remote_api:
+        response = requests.post(
+            EMBEDDINGS_API_URL,
+            headers=HEADERS,
+            json=payload,
+        )
+        return response.json()
+    else:
+        return get_embedding_local(payload)
+
+def get_answer_local(context, question):
+    """Get answer using local QA model"""
+    result = qa_pipeline(question=question, context=context)
+    return {"answer": result["answer"]}
 
 def get_answer(payload):
-    response = requests.post(
-        MODEL_API_URL,
-        headers=HEADERS,
-        json=payload,
-    )
+    """Get answer - uses local model by default, falls back to API if specified"""
+    if args.use_remote_api:
+        response = requests.post(
+            MODEL_API_URL,
+            headers=HEADERS,
+            json=payload,
+        )
+        return response.json()
+    else:
+        # For local model, payload structure is different
+        return get_answer_local(payload["context"], payload["question"])
     return response.json()
 
 
@@ -115,16 +158,27 @@ Answer the question using only the following context:
 Question: {question}
 """
 
-answer = get_answer(
-    {
-        "inputs": {
+if args.use_remote_api:
+    answer = get_answer(
+        {
+            "inputs": {
+                "question": question,
+                "context": context,
+            }
+        })
+else:
+    answer = get_answer(
+        {
             "question": question,
             "context": context,
         }
-    })
+    )
 
 print(f"\nUsing {len(rows)} chunks in answer. Answer:\n")
-print(answer["answer"])
+if isinstance(answer, dict) and "answer" in answer:
+    print(answer["answer"])
+else:
+    print(answer)
 
 view_prompt = input("\nWould you like to see the raw prompt? [Y/N] ")
 if view_prompt == "Y":

@@ -11,13 +11,14 @@ Also, feel free to check out the [BGE family of models](https://huggingface.co/B
 
 - **Python 3.12 or higher**: Ensure you have Python 3.12 or a later version installed.
 - **Poetry**: Install Poetry on your machine for dependency management.
-- **Docker**: Ensure Docker is installed in your WSL environment.
-- **SSH Key**: Configure your SSH key with your GitHub account if you haven't already.
+- **Docker Desktop for Mac**: Install Docker Desktop and ensure Docker Engine is running.
+- **SSH Key** (optional): Configure your SSH key with your GitHub account if using SSH clone.
 
-Links:
-- [Updating Python to 3.12 in WSL](https://stackoverflow.com/questions/78284506/how-to-update-python-to-the-latest-version-3-12-2-in-wsl2)
-- [Installing Poetry with Official installer](https://python-poetry.org/docs/#installing-with-the-official-installer)
-- [Generating a new SSH key and adding it to the ssh-agent](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent)
+Download Links:
+- [Download Docker Desktop for Mac](https://www.docker.com/products/docker-desktop/)
+- [Download Python 3.12](https://www.python.org/downloads/)
+- [Install Poetry (Official Installer)](https://python-poetry.org/docs/#installing-with-the-official-installer)
+- [Generate SSH Key (if needed)](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent)
 
 
 ## Sample output
@@ -40,69 +41,148 @@ Using 5 chunks in answer. Answer:
 Compiling declarative language model calls into self-improving pipelines
 ```
 
-## Setup:
+## Setup (macOS, No Homebrew Required):
 
-This setup works for my WSL installation of Ubuntu with root access.
+### Step 1: Install Docker Desktop
+1. Go to: https://www.docker.com/products/docker-desktop/
+2. Download Docker Desktop for Mac (Apple Silicon or Intel).
+3. Open the .dmg file and drag Docker to Applications.
+4. Launch Docker from Applications.
+5. Wait until Docker is running (check menu bar).
 
-1. **Clone the repository**:
+Verify:
+```bash
+docker --version
+docker run --rm hello-world
+```
+
+### Step 2: Install Python 3.12
+1. Go to: https://www.python.org/downloads/
+2. Download Python 3.12 macOS installer (.pkg).
+3. Run the installer and complete the setup.
+
+Verify:
+```bash
+python3 --version
+```
+
+### Step 3: Install Poetry
+```bash
+curl -sSL https://install.python-poetry.org | python3 -
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+poetry --version
+```
+
+### Step 4: Clone the Repository
+
+Using SSH (if configured):
 ```bash
 git clone git@github.com:smferro54/rag-workshop-from-scratch.git
-cd rag-workshop-from-scratch/
+cd rag-workshop-from-scratch
 ```
 
-2. **Start a pgvector docker container**:
-
+Or using HTTPS:
 ```bash
-docker run -p 6432:5432  --name pgvector -e POSTGRES_PASSWORD=postgres -d pgvector/pgvector:pg17
+git clone https://github.com/smferro54/rag-workshop-from-scratch.git
+cd rag-workshop-from-scratch
 ```
 
-Note: The host port for the docker container is 6432 instead of the normal 5432 to avoid port collisions
-
-3. **Setup the database: Ensure you are in the directory where the repository was cloned.**
+### Step 5: Start pgvector Database Container
 ```bash
-psql -h localhost -p 6432 -U postgres -c "CREATE DATABASE rag_demo;"
-psql -h localhost -p 6432 -U postgres rag_demo < schema.sql
+docker run -p 6432:5432 --name pgvector -e POSTGRES_PASSWORD=postgres -d pgvector/pgvector:pg17
 ```
-Note: All psql commands will prompt for a password, which is **"postgres"**.
 
-*Troubleshoot*: 
+Verify container is running:
 ```bash
-sudo apt update
-sudo apt install postgresql-client-common
-sudo apt install postgresql-client
+docker ps
+docker logs pgvector --tail 50
 ```
 
-4. **Create the .env file:**
+### Step 6: Create Database and Apply Schema
+
+No need to install local psql—use Docker to execute commands:
+
+Create database:
 ```bash
-touch .env
+docker exec -it pgvector psql -U postgres -c "CREATE DATABASE rag_demo;"
 ```
-Note: You can use the example_env.txt as a reference for the required environment variables.
 
-5. **Export your Hugging Face API Key environment variable:**
+Apply schema:
+```bash
+docker exec -i pgvector psql -U postgres -d rag_demo < schema.sql
 ```
+
+Verify:
+```bash
+docker exec -it pgvector psql -U postgres -d rag_demo -c "SELECT * FROM chunks LIMIT 5;"
+```
+
+### Step 7: Create .env File
+```bash
+cp example_env.txt .env
+```
+
+Edit `.env` and add your Hugging Face API key:
+```bash
 source .env
 ```
 
-6. **Install dependencies with Poetry:**
-```
+### Step 8: Install Python Dependencies
+```bash
 poetry install
 ```
-*Troubleshoot*: 
-```
-sudo apt update
-curl -fsSL https://pyenv.run | bash
-pyenv install 3.12.0
-pyenv local 3.12.0
+
+### Step 9: Run the Application
+```bash
+poetry run python -m rag_demo
 ```
 
-### Running
-
-`poetry run python -m rag_demo`
-
-You can skip the embedding step if you already have a database and want to experiment with different models. 
-`poetry run python -m rag_demo --skip-embedding-step`
-
-### Check chunks table first 5 rows
+Or skip embedding if database already indexed:
+```bash
+poetry run python -m rag_demo --skip-embedding-step
 ```
-psql -h localhost -p 6432 -U postgres rag_demo -c "SELECT * FROM chunks LIMIT 5;"
+
+### Useful Docker Commands
+
+Stop container:
+```bash
+docker stop pgvector
 ```
+
+Start container:
+```bash
+docker start pgvector
+```
+
+Remove container (fresh restart):
+```bash
+docker rm -f pgvector
+```
+
+Then recreate with Step 5 command.
+
+## Troubleshooting
+
+**Docker won't start:**
+- Restart Docker Desktop from Applications.
+- Check System Preferences > Security & Privacy (grant permissions if prompted).
+- Reboot your Mac if services are stuck.
+
+**Python version issues:**
+- Verify `python3 --version` shows 3.12+.
+- If not, use the full path: `/Library/Frameworks/Python.framework/Versions/3.12/bin/python3 --version`
+- Or reinstall Python 3.12 from python.org.
+
+**Port 6432 already in use:**
+- Use a different port: `docker run -p 7432:5432 --name pgvector -e POSTGRES_PASSWORD=postgres -d pgvector/pgvector:pg17`
+- Update connection commands to use 7432 instead of 6432.
+
+**Poetry not found:**
+- Verify Poetry installed: `poetry --version`
+- Reload shell: `source ~/.zshrc`
+
+**Docker exec psql commands fail:**
+- Verify container is running: `docker ps`
+- Check container logs: `docker logs pgvector`
+- Recreate container: `docker rm -f pgvector` then re-run Step 5.
