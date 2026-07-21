@@ -1,1 +1,2 @@
 HF_API_KEY=
+EMBEDDING_MODEL_NAME=intfloat/e5-small-v2

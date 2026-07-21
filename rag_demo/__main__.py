@@ -21,7 +21,8 @@ import torch
 load_dotenv()
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 CHUNK_TOKEN_SIZE = 350
-EMBEDDINGS_API_URL = "https://api-inference.huggingface.co/models/BAAI/bge-small-en-v1.5"
+EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "intfloat/e5-small-v2")
+EMBEDDINGS_API_URL = f"https://api-inference.huggingface.co/models/{EMBEDDING_MODEL_NAME}"
 MODEL_API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
 hf_api_key = os.environ.get("HF_API_KEY")
 HEADERS = {
@@ -32,8 +33,8 @@ HEADERS = {
 
 # Load local embedding model
 print("Loading embedding model...")
-embedding_tokenizer = AutoTokenizer.from_pretrained("BAAI/bge-small-en-v1.5")
-embedding_model = AutoModel.from_pretrained("BAAI/bge-small-en-v1.5")
+embedding_tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
+embedding_model = AutoModel.from_pretrained(EMBEDDING_MODEL_NAME)
 embedding_model.eval()
 
 # Load local QA pipeline
@@ -75,17 +76,26 @@ def get_embedding_local(text):
         embeddings = outputs.last_hidden_state.mean(dim=1)
     return embeddings.squeeze().numpy().tolist()
 
-def get_embedding(payload):
+
+def format_text_for_embedding(text, input_type="passage"):
+    """Apply model-specific text formatting for better retrieval quality."""
+    if EMBEDDING_MODEL_NAME.startswith("intfloat/e5"):
+        prefix = "query: " if input_type == "query" else "passage: "
+        return f"{prefix}{text}"
+    return text
+
+def get_embedding(payload, input_type="passage"):
     """Get embedding - uses local model by default, falls back to API if specified"""
+    formatted_payload = format_text_for_embedding(payload, input_type=input_type)
     if args.use_remote_api:
         response = requests.post(
             EMBEDDINGS_API_URL,
             headers=HEADERS,
-            json=payload,
+            json=formatted_payload,
         )
         return response.json()
     else:
-        return get_embedding_local(payload)
+        return get_embedding_local(formatted_payload)
 
 def get_answer_local(context, question):
     """Get answer using local QA model"""
@@ -283,7 +293,7 @@ question = input("\nEnter question: ")
 # Create embedding from question.  Many RAG applications use a query rewriter before querying
 # the vector database.  For more information on query rewriting, see this whitepaper:
 #    https://arxiv.org/abs/2305.14283
-question_embedding = get_embedding(question)
+question_embedding = get_embedding(question, input_type="query")
 
 result = db.execute(
     "SELECT (embedding <=> %s::vector)*100 as score, chunk FROM chunks ORDER BY score DESC LIMIT 5", 
