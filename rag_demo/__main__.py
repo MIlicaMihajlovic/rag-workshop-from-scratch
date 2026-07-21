@@ -13,8 +13,8 @@ import psycopg
 ### PyPDF for text extraction
 from PyPDF2 import PdfReader
 
-### Transformers for local embeddings and QA
-from transformers import AutoTokenizer, AutoModel, pipeline
+### Transformers for local embeddings, reranking, and QA
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, pipeline
 import torch
 
 ### Constants
@@ -22,6 +22,7 @@ load_dotenv()
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "data")
 CHUNK_TOKEN_SIZE = 350
 EMBEDDING_MODEL_NAME = os.environ.get("EMBEDDING_MODEL_NAME", "intfloat/e5-small-v2")
+RERANK_MODEL_NAME = os.environ.get("RERANK_MODEL_NAME", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 EMBEDDINGS_API_URL = f"https://api-inference.huggingface.co/models/{EMBEDDING_MODEL_NAME}"
 MODEL_API_URL = "https://api-inference.huggingface.co/models/deepset/roberta-base-squad2"
 hf_api_key = os.environ.get("HF_API_KEY")
@@ -36,6 +37,12 @@ print("Loading embedding model...")
 embedding_tokenizer = AutoTokenizer.from_pretrained(EMBEDDING_MODEL_NAME)
 embedding_model = AutoModel.from_pretrained(EMBEDDING_MODEL_NAME)
 embedding_model.eval()
+
+# Load local reranker model
+print("Loading reranker model...")
+rerank_tokenizer = AutoTokenizer.from_pretrained(RERANK_MODEL_NAME)
+rerank_model = AutoModelForSequenceClassification.from_pretrained(RERANK_MODEL_NAME)
+rerank_model.eval()
 
 # Load local QA pipeline
 print("Loading QA model...")
@@ -64,6 +71,17 @@ parser.add_argument(
     type=float,
     default=0.15,
     help="Chunk overlap ratio used when splitting long passages.",
+)
+parser.add_argument(
+    "--retrieval-candidates",
+    type=int,
+    default=20,
+    help="Number of vector-retrieved chunks to pass into the reranker.",
+)
+parser.add_argument(
+    "--disable-reranker",
+    action="store_true",
+    help="Disable reranking and answer directly from vector retrieval order.",
 )
 args = parser.parse_args()
 
@@ -115,6 +133,34 @@ def get_answer(payload):
         # For local model, payload structure is different
         return get_answer_local(payload["context"], payload["question"])
     return response.json()
+
+
+def rerank_chunks_local(question, chunks):
+    """Rerank candidate chunks using a cross-encoder relevance model."""
+    if not chunks:
+        return []
+
+    pair_inputs = [[question, chunk] for chunk in chunks]
+    encoded = rerank_tokenizer(
+        pair_inputs,
+        padding=True,
+        truncation=True,
+        max_length=512,
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        logits = rerank_model(**encoded).logits.squeeze(-1)
+
+    if logits.ndim == 0:
+        logits = logits.unsqueeze(0)
+
+    ranked = sorted(
+        zip(chunks, logits.tolist()),
+        key=lambda item: item[1],
+        reverse=True,
+    )
+    return ranked
 
 
 ### PostgreSQL database url and connection
@@ -296,14 +342,31 @@ question = input("\nEnter question: ")
 question_embedding = get_embedding(question, input_type="query")
 
 result = db.execute(
-    "SELECT (embedding <=> %s::vector)*100 as score, chunk FROM chunks ORDER BY score DESC LIMIT 5", 
-    (question_embedding,)
+    "SELECT (embedding <=> %s::vector)*100 as score, chunk FROM chunks ORDER BY score ASC LIMIT %s",
+    (question_embedding, args.retrieval_candidates),
 )
 
 rows = list(result)
 
-print("scores: ", [row[0] for row in rows])
-context = "\n\n".join([row[1] for row in rows])
+if not rows:
+    raise RuntimeError("No chunks found in database. Run indexing first or remove --skip-embedding-step.")
+
+vector_scores = [row[0] for row in rows]
+candidate_chunks = [row[1] for row in rows]
+
+if args.disable_reranker:
+    selected_chunks = candidate_chunks[:5]
+    rerank_scores = []
+else:
+    reranked_chunks = rerank_chunks_local(question, candidate_chunks)
+    selected = reranked_chunks[:5]
+    selected_chunks = [item[0] for item in selected]
+    rerank_scores = [item[1] for item in selected]
+
+print("vector scores (lower is closer):", vector_scores)
+if rerank_scores:
+    print("rerank scores (higher is better):", rerank_scores)
+context = "\n\n".join(selected_chunks)
 
 prompt = f"""
 Answer the question using only the following context:
@@ -329,7 +392,7 @@ else:
         }
     )
 
-print(f"\nUsing {len(rows)} chunks in answer. Answer:\n")
+print(f"\nUsing {len(selected_chunks)} chunks in answer. Answer:\n")
 if isinstance(answer, dict) and "answer" in answer:
     print(answer["answer"])
 else:
