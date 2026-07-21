@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import time
+import sys
 from dotenv import load_dotenv
 import requests
 import numpy as np
@@ -84,6 +85,57 @@ parser.add_argument(
     help="Disable reranking and answer directly from vector retrieval order.",
 )
 args = parser.parse_args()
+
+
+PROMPT_INJECTION_PATTERNS = [
+    re.compile(r"\b(ignore|bypass|override)\b.{0,40}\b(instruction|safety|guardrail|policy)\b", re.IGNORECASE),
+    re.compile(r"\b(reveal|show|print|leak|dump|expose)\b.{0,40}\b(system prompt|hidden prompt|developer message)\b", re.IGNORECASE),
+    re.compile(r"\b(jailbreak|DAN|do anything now)\b", re.IGNORECASE),
+]
+
+MALICIOUS_INTENT_PATTERNS = [
+    ("credential_theft", re.compile(r"\b(steal|phish|harvest|exfiltrat(e|ion)|dump)\b.{0,40}\b(password|credential|token|api key|secret|cookie|session)\b", re.IGNORECASE)),
+    ("malware", re.compile(r"\b(build|write|create|deploy|run|generate)\b.{0,40}\b(malware|ransomware|keylogger|trojan|botnet)\b", re.IGNORECASE)),
+    ("system_intrusion", re.compile(r"\b(hack|exploit|breach|compromise|take over)\b.{0,40}\b(server|database|account|network|website|system)\b", re.IGNORECASE)),
+    ("data_exfiltration", re.compile(r"\b(exfiltrat(e|ion)|dump|steal|copy)\b.{0,40}\b(database|customer data|pii|records|emails|files)\b", re.IGNORECASE)),
+]
+
+BENIGN_SECURITY_CONTEXT_PATTERNS = [
+    re.compile(r"\b(how to (prevent|detect|mitigate|block|defend)|best practice|defensive|security review|threat model|incident response)\b", re.IGNORECASE),
+    re.compile(r"\b(for education|for learning|for a ctf|for testing)\b", re.IGNORECASE),
+]
+
+
+def route_query(question):
+    """Route a query to either safe processing or a blocked path."""
+    normalized = re.sub(r"\s+", " ", question or "").strip()
+    if not normalized:
+        return {"route": "blocked", "reason": "Empty question."}
+
+    for pattern in PROMPT_INJECTION_PATTERNS:
+        if pattern.search(normalized):
+            return {
+                "route": "blocked",
+                "reason": "Query appears to contain prompt-injection intent.",
+            }
+
+    is_benign_security_context = any(
+        pattern.search(normalized) for pattern in BENIGN_SECURITY_CONTEXT_PATTERNS
+    )
+
+    for label, pattern in MALICIOUS_INTENT_PATTERNS:
+        if pattern.search(normalized):
+            if is_benign_security_context:
+                return {
+                    "route": "safe",
+                    "reason": f"Matched {label}, but query appears defensive/educational.",
+                }
+            return {
+                "route": "blocked",
+                "reason": f"Query appears to contain malicious intent ({label}).",
+            }
+
+    return {"route": "safe", "reason": "No malicious intent detected."}
 
 ### Useful functions [can go to a utils.py file]
 def get_embedding_local(text):
@@ -335,6 +387,14 @@ if not args.skip_embedding_step:
     print(f"\nTotal index time: {time.perf_counter() - tic:.2f}s")
 
 question = input("\nEnter question: ")
+
+route_result = route_query(question)
+if route_result["route"] == "blocked":
+    print("\nQuery blocked by safety router.")
+    print("Reason:", route_result["reason"])
+    sys.exit(0)
+else:
+    print("\nRouter decision:", route_result["reason"])
 
 # Create embedding from question.  Many RAG applications use a query rewriter before querying
 # the vector database.  For more information on query rewriting, see this whitepaper:
